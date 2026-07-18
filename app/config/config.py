@@ -38,7 +38,7 @@ class LLMConfig(BaseModel):
 
 
 class DatasetConfig(BaseModel):
-    type: Literal["spider", "bird", "spider2"] = Field(..., description="The type of the dataset")
+    type: Literal["spider", "bird"] = Field(..., description="The type of the dataset")
     split: Optional[str] = Field(default="", description="The split of the dataset")
     root_path: Optional[str] = Field(..., description="The root path of the dataset")
     save_path: Optional[str] = Field(default=None, description="The save path of the dataset snapshot manifest")
@@ -60,10 +60,6 @@ class DatasetConfig(BaseModel):
         elif self.type == "bird":
             if self.split not in ["dev", "test"]:
                 raise ValueError(f"Invalid split: {self.split}")
-        elif self.type == "spider2":
-            # Spider2 supports lite and snow splits
-            if self.split not in ["lite", "snow"]:
-                raise ValueError(f"Invalid split for spider2: {self.split}. Expected 'lite' or 'snow'")
         else:
             raise ValueError(f"Invalid dataset type: {self.type}")
         if self.save_path is None:

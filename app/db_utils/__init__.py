@@ -17,15 +17,6 @@ __all__ = [
     "measure_execution_time",
     "measure_execution_time_for_data_item",
     "SQLExecutionResult",
-    # Cloud schema utilities (Spider2)
-    "load_cloud_database_schema_dict",
-    "load_external_knowledge",
-    "load_snowflake_database_schema",
-    "load_bigquery_database_schema",
-    # Cloud execution utilities (Spider2)
-    "execute_cloud_sql",
-    "execute_bigquery_sql",
-    "execute_snowflake_sql",
 ]
 
 
@@ -57,24 +48,5 @@ def __getattr__(name):
         from . import execution as execution_module
 
         return getattr(execution_module, name)
-
-    if name in {
-        "load_cloud_database_schema_dict",
-        "load_external_knowledge",
-        "load_snowflake_database_schema",
-        "load_bigquery_database_schema",
-    }:
-        from . import cloud_schema as cloud_schema_module
-
-        return getattr(cloud_schema_module, name)
-
-    if name in {
-        "execute_cloud_sql",
-        "execute_bigquery_sql",
-        "execute_snowflake_sql",
-    }:
-        from . import cloud_execution as cloud_execution_module
-
-        return getattr(cloud_execution_module, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

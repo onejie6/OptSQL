@@ -1,0 +1,88 @@
+[logger]
+print_level = "INFO"
+
+[run]
+save_root = "workspace/runs"
+shared_dir = "workspace/shared/bird"
+exp_name = "qwen3-coder-plus-bird-test"
+parallelism = 2
+embedding_batch_size = 128
+llm_timeout = 300
+progress_log_interval = 10
+checkpoint_interval = 10
+default_llm_profile = "qwen3_coder_plus"
+
+[llm_profiles.qwen3_coder_plus]
+model = "qwen3-coder-plus"
+base_url = "env:DS_BASE_URL"
+api_key = "env:DS_API_KEY"
+max_tokens = 16384
+temperature = 0.7
+n_call_strategy = "single"
+max_request_n = 2
+api_type = "openai"
+max_model_len = 131072
+
+[embedding]
+api_type = "local"
+embedding_model_name_or_path = "models/Qwen3-Embedding-0.6B"
+use_qwen3_embedding = true
+normalize_embeddings = true
+embedding_device = "cuda:0"
+
+[dataset]
+type = "bird"
+split = "test"
+root_path = "data/bird"
+sql_execution_timeout = 600
+
+[vector_database]
+store_root_path = "workspace/shared/bird/vector_database"
+max_value_length = 100
+lower_meta_data = true
+build_backend = "local_index"
+
+[few_shot_index]
+num_examples = 7
+question_weight = 0.6
+sql_weight = 0.4
+similarity_device = "cuda:0"
+force_rebuild = false
+llm_profile = "qwen3_coder_plus"
+
+[few_shot_index.preliminary_sql]
+enabled = true
+dc_sampling_budget = 8
+skeleton_sampling_budget = 8
+llm_profile = "qwen3_coder_plus"
+
+[value_retrieval]
+max_values_per_column = 5
+backend = "local_index"
+local_index_device = "cuda:0"
+llm_profile = "qwen3_coder_plus"
+
+[schema_linking]
+direct_linking_sampling_budget = 8
+reversed_linking_sampling_budget = 8
+value_distance_threshold = 0.05
+llm_profile = "qwen3_coder_plus"
+
+[sql_generation]
+dc_sampling_budget = 8
+skeleton_sampling_budget = 8
+icl_sampling_budget = 8
+llm_profile = "qwen3_coder_plus"
+
+[sql_revision]
+checker_sampling_budget = 8
+llm_profile = "qwen3_coder_plus"
+
+[sql_selection]
+filter_top_k_sql = 2
+evaluator_sampling_budget = 8
+shortcut_consistency_score_threshold = 0.6
+llm_profile = "qwen3_coder_plus"
+
+[llm_extractor]
+max_retry = 5

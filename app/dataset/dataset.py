@@ -256,12 +256,14 @@ class BirdDataset(BaseDataset):
         data = []
         db_sample_count = {}  # Track samples per database
         
-        for data_item in tqdm(data_list, desc="Loading data"):
+        for position, data_item in enumerate(tqdm(data_list, desc="Loading data")):
             question_id = data_item.get("question_id")
-            question = data_item.get("question")
-            evidence = data_item.get("evidence")
-            gold_sql = data_item.get("SQL")
-            difficulty = data_item.get("difficulty")
+            if question_id is None:
+                question_id = position
+            question = data_item.get("question") or ""
+            evidence = data_item.get("evidence") or ""
+            gold_sql = data_item.get("SQL") or ""
+            difficulty = data_item.get("difficulty") or ""
             database_id = data_item.get("db_id")
             
             # Check if we've reached the max samples per database limit
@@ -365,13 +367,5 @@ class DatasetFactory:
             return BirdDataset(dataset_config)
         elif dataset_config.type == "spider":
             return SpiderDataset(dataset_config)
-        elif dataset_config.type == "spider2":
-            from .spider2_dataset import Spider2LiteDataset, Spider2SnowDataset
-            if dataset_config.split == "lite":
-                return Spider2LiteDataset(dataset_config)
-            elif dataset_config.split == "snow":
-                return Spider2SnowDataset(dataset_config)
-            else:
-                raise ValueError(f"Invalid spider2 split: {dataset_config.split}. Expected 'lite' or 'snow'")
         else:
             raise ValueError(f"Invalid dataset type: {dataset_config.type}")

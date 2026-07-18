@@ -14,6 +14,7 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
+if (-not $OptSQLRoot) { $OptSQLRoot = Join-Path $root "vendor/optsql_controller" }
 
 $resolvedConfig = Resolve-Path $ConfigPath -ErrorAction Stop
 $env:PYTHONUTF8 = "1"

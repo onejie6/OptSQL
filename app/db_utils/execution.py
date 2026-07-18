@@ -338,15 +338,6 @@ def execute_sql_for_data_item(
     resolved_timeout = _resolve_timeout(timeout)
     db_type = getattr(data_item, "db_type", None)
 
-    if db_type is None or db_type == "sqlite":
-        return execute_sql(data_item.database_path, sql, timeout=resolved_timeout)
-
-    from .cloud_execution import execute_cloud_sql
-
-    credential_path = None
-    if db_type == "bigquery":
-        credential_path = bigquery_credential_path
-    elif db_type == "snowflake":
-        credential_path = snowflake_credential_path
-
-    return execute_cloud_sql(sql, db_type, data_item.database_path, credential_path, resolved_timeout)
+    if db_type is not None and db_type != "sqlite":
+        raise ValueError(f"Unsupported database type in this BIRD submission: {db_type}")
+    return execute_sql(data_item.database_path, sql, timeout=resolved_timeout)
