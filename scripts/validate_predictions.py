@@ -22,7 +22,11 @@ def main() -> int:
     actual_ids = set(predictions)
     missing = sorted(expected_ids - actual_ids, key=int)
     empty = sorted(
-        (question_id for question_id in expected_ids if not str(predictions.get(question_id, "")).strip()),
+        (
+            question_id
+            for question_id in expected_ids
+            if not str(predictions.get(question_id, "")).strip()
+        ),
         key=int,
     )
     extra = sorted(actual_ids - expected_ids, key=int)

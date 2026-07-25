@@ -1,7 +1,7 @@
 from app.dataset import BaseDataset, load_dataset, save_dataset, DataItem
 from app.llm import LLM
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .generators import DCGenerator, SkeletonGenerator, ICLGenerator
+from .generators import DCGenerator, EvidenceGenerator, SkeletonGenerator, ICLGenerator
 from app.pipeline.validation import validate_pipeline_step
 import time
 from app.logger import logger
@@ -9,6 +9,7 @@ from app.progress import log_progress, should_checkpoint
 from tqdm import tqdm
 import traceback
 from app.services import ArtifactStore, STAGE_ARTIFACT_FIELDS, configure_schema_service, load_stage_dataset, reset_schema_service
+from app.meta_controller import ControllerAction, MetaControllerRuntime
 
 
 class SQLGenerationRunner:
@@ -21,6 +22,7 @@ class SQLGenerationRunner:
     _dc_generator: DCGenerator = None
     _skeleton_generator: SkeletonGenerator = None
     _icl_generator: ICLGenerator = None
+    _evidence_generator: EvidenceGenerator = None
     _artifact_store: ArtifactStore = None
     _extractor_max_retry: int = 3
     _stage_config = None
@@ -29,6 +31,7 @@ class SQLGenerationRunner:
     _parallelism: int = 16
     _progress_log_interval: int = 50
     _checkpoint_interval: int = 20
+    _meta_controller: MetaControllerRuntime | None = None
     
     def __init__(
         self,
@@ -39,6 +42,7 @@ class SQLGenerationRunner:
         parallelism: int,
         progress_log_interval: int,
         checkpoint_interval: int,
+        meta_controller_config=None,
     ):
         self._stage_config = stage_config
         self._dataset_config = dataset_config
@@ -47,6 +51,8 @@ class SQLGenerationRunner:
         self._parallelism = max(1, parallelism)
         self._progress_log_interval = max(1, progress_log_interval)
         self._checkpoint_interval = max(1, checkpoint_interval)
+        if meta_controller_config is not None and meta_controller_config.enabled:
+            self._meta_controller = MetaControllerRuntime(meta_controller_config)
         self._artifact_store = ArtifactStore(
             self._stage_config.save_path,
             "sql_generation",
@@ -71,6 +77,7 @@ class SQLGenerationRunner:
             few_shot_examples_path=self._stage_config.icl_few_shot_examples_path,
             extractor_max_retry=self._extractor_max_retry,
         )
+        self._evidence_generator = EvidenceGenerator(extractor_max_retry=self._extractor_max_retry)
 
     @classmethod
     def from_config(cls, app_config=None) -> "SQLGenerationRunner":
@@ -86,8 +93,8 @@ class SQLGenerationRunner:
             parallelism=app_config.run_config.parallelism,
             progress_log_interval=app_config.run_config.progress_log_interval,
             checkpoint_interval=app_config.run_config.checkpoint_interval,
+            meta_controller_config=app_config.meta_controller_config,
         )
-        
     def _generate_sql(self, data_item: DataItem) -> None:
         start_time = time.time()
         
@@ -98,7 +105,8 @@ class SQLGenerationRunner:
         generation_tasks = {
             "dc": self._inner_thread_pool_executor.submit(self._dc_generator.generate, data_item, self._llm, self._stage_config.dc_sampling_budget),
             "skeleton": self._inner_thread_pool_executor.submit(self._skeleton_generator.generate, data_item, self._llm, self._stage_config.skeleton_sampling_budget),
-            "icl": self._inner_thread_pool_executor.submit(self._icl_generator.generate, data_item, self._llm, self._stage_config.icl_sampling_budget)
+            "icl": self._inner_thread_pool_executor.submit(self._icl_generator.generate, data_item, self._llm, self._stage_config.icl_sampling_budget),
+            "evidence": self._inner_thread_pool_executor.submit(self._evidence_generator.generate, data_item, self._llm, self._stage_config.evidence_sampling_budget),
         }
         
         results = {}
@@ -114,15 +122,85 @@ class SQLGenerationRunner:
         dc_sql_candidates, dc_tokens = results["dc"]
         skeleton_sql_candidates, skeleton_tokens = results["skeleton"]
         icl_sql_candidates, icl_tokens = results["icl"]
+        evidence_sql_candidates, evidence_tokens = results["evidence"]
         
         # Accumulate token usage
-        for tokens in [dc_tokens, skeleton_tokens, icl_tokens]:
+        for tokens in [dc_tokens, skeleton_tokens, icl_tokens, evidence_tokens]:
             total_token_usage["prompt_tokens"] += tokens["prompt_tokens"]
             total_token_usage["completion_tokens"] += tokens["completion_tokens"]
             total_token_usage["total_tokens"] += tokens["total_tokens"]
+
+        candidates_by_source = {
+            "dc": dc_sql_candidates,
+            "skeleton": skeleton_sql_candidates,
+            "icl": icl_sql_candidates,
+            "evidence": evidence_sql_candidates,
+        }
+        if self._meta_controller is not None:
+            current_budget = max(
+                self._stage_config.dc_sampling_budget,
+                self._stage_config.skeleton_sampling_budget,
+                self._stage_config.icl_sampling_budget,
+                self._stage_config.evidence_sampling_budget,
+            )
+            decision = self._meta_controller.assess_generation(
+                data_item,
+                candidates_by_source,
+                current_budget,
+            )
+            if decision.action == ControllerAction.ESCALATE:
+                max_budget = self._meta_controller.config.max_generation_sampling_budget
+                generators = {
+                    "dc": (self._dc_generator, self._stage_config.dc_sampling_budget),
+                    "skeleton": (self._skeleton_generator, self._stage_config.skeleton_sampling_budget),
+                    "icl": (self._icl_generator, self._stage_config.icl_sampling_budget),
+                }
+                extra_tasks = {}
+                for name, (generator, initial_budget) in generators.items():
+                    extra_budget = max(0, max_budget - initial_budget)
+                    if extra_budget:
+                        extra_tasks[name] = self._inner_thread_pool_executor.submit(
+                            generator.generate, data_item, self._llm, extra_budget
+                        )
+                reflection_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                for name, future in extra_tasks.items():
+                    try:
+                        extra_candidates, extra_tokens = future.result()
+                        existing = candidates_by_source[name] or []
+                        candidates_by_source[name] = list(
+                            dict.fromkeys([*existing, *(extra_candidates or [])])
+                        )
+                        for key in reflection_usage:
+                            reflection_usage[key] += extra_tokens[key]
+                            total_token_usage[key] += extra_tokens[key]
+                    except Exception as exc:
+                        logger.error(
+                            f"Controller generation reflection failed for {name} on item "
+                            f"{data_item.question_id}: {exc}"
+                        )
+                after_decision = self._meta_controller.policy.assess_generation(
+                    data_item,
+                    candidates_by_source,
+                    max_budget,
+                )
+                self._meta_controller.record_reflection_result(
+                    decision,
+                    signals_after=after_decision.signals,
+                    token_usage=reflection_usage,
+                )
+
+        dc_sql_candidates = candidates_by_source["dc"]
+        skeleton_sql_candidates = candidates_by_source["skeleton"]
+        icl_sql_candidates = candidates_by_source["icl"]
+        evidence_sql_candidates = candidates_by_source["evidence"]
         
         # Check if any generator failed (returned None)
-        if dc_sql_candidates is None or skeleton_sql_candidates is None or icl_sql_candidates is None:
+        if self._meta_controller is None and (
+            dc_sql_candidates is None
+            or skeleton_sql_candidates is None
+            or icl_sql_candidates is None
+            or evidence_sql_candidates is None
+        ):
             failed_generators = []
             if dc_sql_candidates is None:
                 failed_generators.append("dc")
@@ -130,10 +208,24 @@ class SQLGenerationRunner:
                 failed_generators.append("skeleton")
             if icl_sql_candidates is None:
                 failed_generators.append("icl")
+            if evidence_sql_candidates is None:
+                failed_generators.append("evidence")
             logger.error(f"Generator(s) {failed_generators} failed for item {data_item.question_id}, setting sql_candidates to None")
             data_item.sql_candidates = None
         else:
-            data_item.sql_candidates = dc_sql_candidates + skeleton_sql_candidates + icl_sql_candidates
+            data_item.sql_candidates = list(
+                dict.fromkeys(
+                    candidate
+                    for candidates in (
+                        dc_sql_candidates,
+                        skeleton_sql_candidates,
+                        icl_sql_candidates,
+                        evidence_sql_candidates,
+                    )
+                    for candidate in (candidates or [])
+                    if candidate and candidate.strip()
+                )
+            )
         
         end_time = time.time()
         data_item.sql_generation_time = end_time - start_time
@@ -186,6 +278,7 @@ class SQLGenerationRunner:
         self._dc_generator = None
         self._skeleton_generator = None
         self._icl_generator = None
+        self._evidence_generator = None
         if self._artifact_store is not None:
             self._artifact_store.close()
         reset_schema_service()

@@ -3,6 +3,8 @@ from app.llm import LLM
 from app.logger import logger
 from app.prompt import PromptFactory
 from app.llm_extractor import LLMExtractor
+from app.pipeline.sql_selection.semantic_risk import audit_semantic_risks
+from app.meta_controller import MetaControllerRuntime
 from app.pipeline.validation import validate_pipeline_step
 from app.progress import log_progress, should_checkpoint
 from typing import Dict, List, Any, Optional, Tuple
@@ -33,6 +35,7 @@ class SQLSelectionRunner:
     _parallelism: int = 16
     _progress_log_interval: int = 50
     _checkpoint_interval: int = 20
+    _meta_controller: MetaControllerRuntime | None = None
     
     def __init__(
         self,
@@ -43,6 +46,7 @@ class SQLSelectionRunner:
         parallelism: int,
         progress_log_interval: int,
         checkpoint_interval: int,
+        meta_controller_config=None,
     ):
         self._stage_config = stage_config
         self._dataset_config = dataset_config
@@ -51,6 +55,8 @@ class SQLSelectionRunner:
         self._parallelism = max(1, parallelism)
         self._progress_log_interval = max(1, progress_log_interval)
         self._checkpoint_interval = max(1, checkpoint_interval)
+        if meta_controller_config is not None and meta_controller_config.enabled:
+            self._meta_controller = MetaControllerRuntime(meta_controller_config)
         self._artifact_store = ArtifactStore(
             self._stage_config.save_path,
             "sql_selection",
@@ -91,6 +97,7 @@ class SQLSelectionRunner:
             parallelism=app_config.run_config.parallelism,
             progress_log_interval=app_config.run_config.progress_log_interval,
             checkpoint_interval=app_config.run_config.checkpoint_interval,
+            meta_controller_config=app_config.meta_controller_config,
         )
     
     def _parse_llm_response(self, response: str) -> Optional[List[Dict[str, Any]]]:
@@ -115,6 +122,28 @@ class SQLSelectionRunner:
             logger.error(f"Error parsing LLM response: {e}")
             logger.debug(f"Response content: {response}")
             return None
+
+    @staticmethod
+    def _parse_listwise_response(response: str, candidate_count: int) -> Optional[int]:
+        answer_match = re.search(r"<result>\s*([A-Z])\s*</result>", response, re.IGNORECASE)
+        if not answer_match:
+            return None
+        candidate_index = ord(answer_match.group(1).upper()) - ord("A")
+        if candidate_index < 0 or candidate_index >= candidate_count:
+            return None
+        return candidate_index
+
+    @staticmethod
+    def _get_position_balanced_orders(candidate_count: int, vote_count: int) -> List[List[int]]:
+        base_order = list(range(candidate_count))
+        orders = []
+        for vote_index in range(max(1, vote_count)):
+            shift = (vote_index * candidate_count) // max(1, vote_count)
+            order = base_order[shift:] + base_order[:shift]
+            if vote_index % 2 == 1:
+                order = list(reversed(order))
+            orders.append(order)
+        return orders
 
     def _get_top_k_sql_candidates(self, data_item: DataItem) -> List[Tuple[str, str, float, float]]:
         valid_sql_candidates = []
@@ -296,6 +325,106 @@ class SQLSelectionRunner:
                     win_prob = np.mean(win_matrix[sql_a_idx, sql_b_idx, :])
                     robust_win_matrix[sql_a_idx, sql_b_idx] = win_prob
         return robust_win_matrix
+
+    def _select_with_evidence_listwise(
+        self,
+        data_item: DataItem,
+        top_k_sql_candidates: List[Tuple[str, str, float, float]],
+        database_schema_profile: str,
+    ) -> Tuple[str, Dict[str, int], str]:
+        total_token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        dialect = "sqlite" if getattr(data_item, "db_type", None) in (None, "sqlite") else data_item.db_type
+        risk_findings = [
+            audit_semantic_risks(
+                candidate[0],
+                data_item.question,
+                data_item.evidence,
+                dialect=dialect,
+                schema=data_item.database_schema_after_schema_linking,
+            )
+            for candidate in top_k_sql_candidates
+        ]
+        logger.info(
+            f"Semantic-risk audit for item {data_item.question_id}: "
+            f"{dict(enumerate(risk_findings))}; warnings are advisory only"
+        )
+
+        vote_count = max(1, self._stage_config.evaluator_sampling_budget)
+        orders = self._get_position_balanced_orders(len(top_k_sql_candidates), vote_count)
+
+        future_to_order = {}
+        for order in orders:
+            ordered_candidates = [
+                (
+                    top_k_sql_candidates[index][0],
+                    top_k_sql_candidates[index][1],
+                    top_k_sql_candidates[index][2],
+                    risk_findings[index],
+                )
+                for index in order
+            ]
+            prompt = PromptFactory.format_evidence_listwise_selection_prompt(
+                database_schema_profile,
+                data_item.question,
+                data_item.evidence,
+                ordered_candidates,
+            )
+            future = self._inner_thread_pool_executor.submit(
+                self._extractor.extract_with_retry,
+                llm=self._llm,
+                messages=[{"role": "user", "content": prompt}],
+                rule_parser=lambda response, size=len(order): self._parse_listwise_response(response, size),
+                fix_end_token=self._llm.llm_config.fix_end_token,
+                end_token="</result>",
+                n=1,
+            )
+            future_to_order[future] = order
+
+        global_votes = []
+        for future in as_completed(future_to_order):
+            order = future_to_order[future]
+            try:
+                local_votes, token_usage = future.result()
+                for key in total_token_usage:
+                    total_token_usage[key] += token_usage[key]
+                if local_votes:
+                    global_votes.append(order[local_votes[0]])
+            except Exception as exc:
+                logger.error(f"Evidence-listwise selection vote failed: {exc}")
+
+        if not global_votes:
+            return top_k_sql_candidates[0][0], total_token_usage, "listwise_fallback_no_votes"
+
+        vote_counts = Counter(global_votes)
+        max_votes = max(vote_counts.values())
+        vote_agreement = max_votes / len(global_votes)
+        if vote_agreement < self._stage_config.min_vote_agreement:
+            logger.info(
+                f"Evidence-listwise votes for item {data_item.question_id} did not reach "
+                f"the agreement gate: {dict(sorted(vote_counts.items()))}; "
+                f"agreement {vote_agreement:.3f} < {self._stage_config.min_vote_agreement:.3f}; "
+                "falling back to the top-support cluster"
+            )
+            return (
+                top_k_sql_candidates[0][0],
+                total_token_usage,
+                "listwise_low_agreement_fallback",
+            )
+
+        tied_indices = [index for index, count in vote_counts.items() if count == max_votes]
+        selected_index = min(
+            tied_indices,
+            key=lambda index: (-top_k_sql_candidates[index][2], top_k_sql_candidates[index][3], index),
+        )
+        logger.info(
+            f"Evidence-listwise votes for item {data_item.question_id}: "
+            f"{dict(sorted(vote_counts.items()))}; selected cluster {selected_index}"
+        )
+        return (
+            top_k_sql_candidates[selected_index][0],
+            total_token_usage,
+            "listwise_supermajority_selected",
+        )
     
     def _select_best_sql(self, data_item: DataItem) -> None:
         """
@@ -307,6 +436,16 @@ class SQLSelectionRunner:
         total_token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 
         top_k_sql_candidates = self._get_top_k_sql_candidates(data_item)
+        controller_decision = (
+            self._meta_controller.assess_selection(
+                data_item,
+                top_k_sql_candidates,
+                self._stage_config.shortcut_consistency_score_threshold,
+                self._stage_config.evaluator_sampling_budget,
+            )
+            if self._meta_controller is not None
+            else None
+        )
         
         if len(top_k_sql_candidates) == 0:
             logger.warning("No valid SQL candidates, backing to top-1 SQL")
@@ -319,6 +458,13 @@ class SQLSelectionRunner:
                 "completion_tokens": data_item.total_llm_cost["completion_tokens"] + data_item.sql_selection_llm_cost["completion_tokens"],
                 "total_tokens": data_item.total_llm_cost["total_tokens"] + data_item.sql_selection_llm_cost["total_tokens"],
             }
+            if controller_decision is not None:
+                self._meta_controller.record_stage_outcome(
+                    controller_decision,
+                    status="fallback_no_executable_cluster",
+                    selected_sql=data_item.final_selected_sql,
+                    token_usage=total_token_usage,
+                )
             return
         
         if len(top_k_sql_candidates) == 1:
@@ -332,11 +478,34 @@ class SQLSelectionRunner:
                 "completion_tokens": data_item.total_llm_cost["completion_tokens"] + data_item.sql_selection_llm_cost["completion_tokens"],
                 "total_tokens": data_item.total_llm_cost["total_tokens"] + data_item.sql_selection_llm_cost["total_tokens"],
             }
+            if controller_decision is not None:
+                self._meta_controller.record_stage_outcome(
+                    controller_decision,
+                    status="single_cluster_shortcut",
+                    selected_sql=data_item.final_selected_sql,
+                    token_usage=total_token_usage,
+                )
             return
         
         # shortcut case
         # if the consistency score of top-1 SQL is larger than a threshold, directly select it
-        if top_k_sql_candidates[0][2] >= self._stage_config.shortcut_consistency_score_threshold:
+        dialect = "sqlite" if getattr(data_item, "db_type", None) in (None, "sqlite") else data_item.db_type
+        shortcut_risks = [
+            audit_semantic_risks(
+                candidate[0],
+                data_item.question,
+                data_item.evidence,
+                dialect=dialect,
+                schema=data_item.database_schema_after_schema_linking,
+            )
+            for candidate in top_k_sql_candidates
+        ]
+        minimum_shortcut_risk = min(len(findings) for findings in shortcut_risks)
+        top_candidate_has_minimum_risk = len(shortcut_risks[0]) == minimum_shortcut_risk
+        if (
+            top_k_sql_candidates[0][2] >= self._stage_config.shortcut_consistency_score_threshold
+            and top_candidate_has_minimum_risk
+        ):
         # if top_k_sql_candidates[0][2] - top_k_sql_candidates[1][2] >= self._stage_config.shortcut_consistency_score_threshold:
             logger.info(f"Top-1 SQL candidate has a large consistency score: {top_k_sql_candidates[0][2]}, directly select it")
             # logger.info(f"Top-1 SQL candidate has a larger consistency score than top-2 SQL candidate ({top_k_sql_candidates[0][2]} vs. {top_k_sql_candidates[1][2]}), directly select the top-1 SQL")
@@ -349,8 +518,50 @@ class SQLSelectionRunner:
                 "completion_tokens": data_item.total_llm_cost["completion_tokens"] + data_item.sql_selection_llm_cost["completion_tokens"],
                 "total_tokens": data_item.total_llm_cost["total_tokens"] + data_item.sql_selection_llm_cost["total_tokens"],
             }
+            if controller_decision is not None:
+                self._meta_controller.record_stage_outcome(
+                    controller_decision,
+                    status="consensus_shortcut",
+                    selected_sql=data_item.final_selected_sql,
+                    token_usage=total_token_usage,
+                )
             return
+        if top_k_sql_candidates[0][2] >= self._stage_config.shortcut_consistency_score_threshold:
+            logger.info(
+                f"Consistency shortcut bypassed for item {data_item.question_id}: "
+                f"top risk {shortcut_risks[0]}, minimum finding count {minimum_shortcut_risk}"
+            )
         
+        if self._stage_config.selection_strategy == "evidence_listwise":
+            database_schema_profile = get_schema_service().build_schema_profile(
+                data_item.database_schema_after_schema_linking,
+                include_value_statistics=True,
+                include_value_examples=True,
+            )
+            selected_sql, listwise_token_usage, selection_status = self._select_with_evidence_listwise(
+                data_item,
+                top_k_sql_candidates,
+                database_schema_profile,
+            )
+            data_item.final_selected_sql = selected_sql
+            total_token_usage = listwise_token_usage
+            data_item.sql_selection_time = time.time() - start_time
+            data_item.sql_selection_llm_cost = total_token_usage
+            data_item.total_time += data_item.sql_selection_time
+            data_item.total_llm_cost = {
+                "prompt_tokens": data_item.total_llm_cost["prompt_tokens"] + total_token_usage["prompt_tokens"],
+                "completion_tokens": data_item.total_llm_cost["completion_tokens"] + total_token_usage["completion_tokens"],
+                "total_tokens": data_item.total_llm_cost["total_tokens"] + total_token_usage["total_tokens"],
+            }
+            if controller_decision is not None:
+                self._meta_controller.record_stage_outcome(
+                    controller_decision,
+                    status=selection_status,
+                    selected_sql=data_item.final_selected_sql,
+                    token_usage=total_token_usage,
+                )
+            return
+
         # using pair-wise comparison to select the best sql
         database_schema_profile = get_schema_service().build_schema_profile(
             data_item.database_schema_after_schema_linking,
@@ -411,6 +622,13 @@ class SQLSelectionRunner:
             "completion_tokens": data_item.total_llm_cost["completion_tokens"] + data_item.sql_selection_llm_cost["completion_tokens"],
             "total_tokens": data_item.total_llm_cost["total_tokens"] + data_item.sql_selection_llm_cost["total_tokens"],
         }
+        if controller_decision is not None:
+            self._meta_controller.record_stage_outcome(
+                controller_decision,
+                status="pairwise_failed" if has_failure else "pairwise_selected",
+                selected_sql=data_item.final_selected_sql,
+                token_usage=total_token_usage,
+            )
     
     def run(self):
         future_to_item = {}

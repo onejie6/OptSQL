@@ -27,7 +27,9 @@ def _flatten_meanings(payload: Any) -> dict[tuple[str, str, str], str]:
     for key, value in payload.items():
         if isinstance(key, str) and key.count("|") >= 2:
             db_id, table_name, column_name = key.split("|", 2)
-            flattened[(db_id.casefold(), table_name.casefold(), column_name.casefold())] = str(value or "")
+            flattened[
+                (db_id.casefold(), table_name.casefold(), column_name.casefold())
+            ] = str(value or "")
             continue
         if not isinstance(value, dict):
             continue
@@ -35,9 +37,13 @@ def _flatten_meanings(payload: Any) -> dict[tuple[str, str, str], str]:
             if not isinstance(columns, dict):
                 continue
             for column_name, description in columns.items():
-                flattened[(str(key).casefold(), str(table_name).casefold(), str(column_name).casefold())] = str(
-                    description or ""
-                )
+                flattened[
+                    (
+                        str(key).casefold(),
+                        str(table_name).casefold(),
+                        str(column_name).casefold(),
+                    )
+                ] = str(description or "")
     return flattened
 
 
@@ -51,7 +57,9 @@ def _database_file(database_dir: Path, db_id: str) -> Path:
         return expected
     candidates = sorted(database_dir.glob("*.sqlite"))
     if len(candidates) != 1:
-        raise FileNotFoundError(f"Could not identify one SQLite file in {database_dir}")
+        raise FileNotFoundError(
+            f"Could not identify one SQLite file in {database_dir}"
+        )
     return candidates[0]
 
 
@@ -88,7 +96,11 @@ def write_database_descriptions(
                     for column in columns:
                         column_name = str(column[1])
                         description = meanings.get(
-                            (db_id.casefold(), table_name.casefold(), column_name.casefold()),
+                            (
+                                db_id.casefold(),
+                                table_name.casefold(),
+                                column_name.casefold(),
+                            ),
                             "",
                         )
                         described_columns += int(bool(description))

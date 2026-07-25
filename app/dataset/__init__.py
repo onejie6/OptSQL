@@ -28,3 +28,22 @@ __all__ = [
     "SpiderDataset", 
     "BirdDataset",
 ]
+
+try:
+    from .spider2_dataset import (
+        Spider2DataItem,
+        Spider2LiteDataset,
+        Spider2SnowDataset,
+        get_db_type_from_instance_id,
+    )
+except ModuleNotFoundError:
+    pass
+else:
+    __all__.extend(
+        [
+            "Spider2DataItem",
+            "Spider2LiteDataset",
+            "Spider2SnowDataset",
+            "get_db_type_from_instance_id",
+        ]
+    )

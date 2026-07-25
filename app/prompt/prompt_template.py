@@ -118,7 +118,7 @@ Here is a high level description of the steps.
     - Only select columns mentioned in the user's question and with the SAME ORDER as the question requires.
     - Avoid unnecessary columns or values.
 2. **Handling NULLs:**
-    - If a column may contain NULL values, use `JOIN` or `WHERE <column> IS NOT NULL`.
+    - Do not add `IS NOT NULL` merely because a column is nullable. Add it only when the question or hint explicitly excludes missing values, or when it is required to prevent invalid arithmetic.
 3. **FROM/JOIN Clauses:**
     - Only include tables essential to answer the question.
 4. **Thorough Question Analysis:**
@@ -445,4 +445,228 @@ SQL Candidate B:
 Based on the question and the two SQL queries, analyze which query answers the question correctly, and only output the XML code as your response.
 
 # Output:
+"""
+
+
+EVIDENCE_BLUEPRINT_PROMPT = """
+# Task
+Create a verified context blueprint before writing SQL. Resolve the question and
+evidence against the schema, with special attention to row grain and join
+multiplicity.
+
+# Rules
+1. Evidence mappings and formulas are binding.
+2. The entity counted in a denominator or requested as "all X" defines row grain.
+   For "percentage of X who/that/with Y", X is the denominator cohort: apply
+   the X-defining predicate before COUNT, and put only the additional Y
+   condition in the numerator. Do not count the full table as the denominator.
+3. Find the shortest foreign-key path that preserves that grain. Inspect column
+   descriptions, not only table names. If the entity has a direct foreign key to
+   a filtering dimension, reject longer bridge-table paths unless bridge
+   attributes or existence are explicitly required.
+   Schema column descriptions are benchmark ground truth and override real-world
+   assumptions. Do not reinterpret a described business key as a weaker concept
+   such as home location when its description directly matches the requested
+   branch/location/category.
+   Hard constraint: when the row-grain entity has a direct foreign key whose
+   description contains the requested dimension meaning, use that direct key.
+   This overrides grammatical mentions of associated objects and any normalized
+   real-world data-model assumption.
+4. State exact output columns, filters, joins, aggregation/window scope,
+   ordering/limit, and assumptions that must not be introduced.
+5. For a superlative group described by a metric, keep the aggregation at the
+   requested metric/group grain. Do not first choose an arbitrary entity key
+   when multiple entities can share the maximum metric value.
+6. Treat delimiter-separated identifiers as possible encoded data. When the
+   requested outputs are components of such an identifier, verify whether they
+   should be derived with string operations instead of assumed lookup joins.
+   For an encoded relationship with two endpoints, preserve one relationship
+   row with one output column per endpoint; do not turn the pair into two UNION
+   rows or duplicate both stored orientations.
+7. Respect declared column types. Do not introduce CAST for ordering or
+   comparison unless the evidence explicitly requests a conversion.
+8. Treat columns named inside evidence functions such as MAX(time), MIN(time),
+   or SUM(amount) as binding sources. Record any required source-format parsing.
+9. For "X compared to all other Y", define the denominator as Y excluding X.
+   Record direct frequency attributes and relationship role/type constraints.
+10. Do not write SQL yet.
+
+# Output format
+<result>
+Row grain: ...
+Output: ...
+Filters: ...
+Shortest joins: ...
+Aggregation/window scope: ...
+Ordering/limit: ...
+Forbidden assumptions: ...
+</result>
+
+# Database schema
+{DATABASE_SCHEMA}
+
+# Question
+{QUESTION}
+
+# Evidence
+{HINT}
+
+# Deterministic relationship hints
+{RELATIONSHIP_HINTS}
+
+# Output
+"""
+
+
+EVIDENCE_SQL_GENERATION_PROMPT = """
+# Task
+Generate one SQLite query by treating the question, evidence, and schema as an
+executable semantic contract. This route is intentionally independent from
+generic SQL-generation heuristics.
+
+# Contract rules
+1. The evidence is binding. When it says a phrase refers to a specific column,
+   value, operator, or formula, implement that mapping literally.
+2. Project exactly the columns requested by the evidence, in order. If the
+   evidence maps a human phrase to an `*_id` column, return that ID directly;
+   do not join a lookup table to replace it with a display name.
+3. Use the shortest valid relationship path. A column description can resolve
+   narrative wording directly; do not add tables merely because their names
+   resemble words in the question. Before traversing bridge/transaction tables,
+   inspect the requested entity for a direct foreign key to the filtering
+   dimension. Prefer that direct business relationship when its column
+   description matches the question. Do not traverse an association table merely
+   because the prose says an entity "has" something unless association-level
+   multiplicity or attributes are actually requested.
+   For proportions and counts, the entity named in the denominator establishes
+   the row grain. Keep that entity as the counting grain and avoid one-to-many
+   association joins that duplicate it. Resolve a location/category filter by a
+   direct foreign key on that entity whenever the schema describes such a key.
+   Treat schema descriptions as benchmark ground truth; never override a direct
+   description with outside commonsense about how the real domain might work.
+4. Do not add `IS NOT NULL`, DISTINCT, latest/earliest-row logic, averaging,
+   extra joins, or tie behavior unless the question/evidence requires it.
+5. Apply filters that define the target population before ranking, windowing,
+   or aggregation. Filter after a window only when explicitly requested.
+6. Implement arithmetic exactly as stated. When evidence defines arithmetic on
+   conditionally selected values from a one-to-many table and does not request
+   AVG/latest, make each operand scalar with `SUM(CASE WHEN ... THEN value ELSE
+   0 END)` over all matching records.
+7. For "percentage of X who/that/with Y", filter to the X cohort before
+   aggregation so COUNT measures X; use Y only as the conditional numerator.
+   For "X compared to all other Y", the denominator is Y excluding X, not the
+   total including X. Preserve every population qualifier in the question even
+   when the evidence only spells out the arithmetic.
+8. For superlatives, do not select an arbitrary entity ID before aggregation
+   when the ordering metric can repeat. Preserve the requested group grain and
+   only introduce tie-breaking when the contract provides it.
+9. A delimiter-separated ID may encode requested component IDs. Compare its
+   format with the requested output before adding lookup joins; use SQLite
+   string operations when the evidence/schema indicates encoded components.
+   For a relationship containing two endpoints, return one row with two endpoint
+   columns, not two UNION rows and not both forward/reverse stored orientations.
+10. Respect schema storage types exactly. Do not CAST a TEXT ordering/filtering
+    column to numeric merely because its values look numeric; only convert when
+    the evidence explicitly requires conversion.
+11. A column named inside an evidence aggregate or formula, such as MAX(time) or
+    MIN(time), is binding. Do not substitute a normalized-looking column such as
+    milliseconds. If evidence describes the source string format, parse that
+    source exactly as specified.
+12. When wording asks "how often" and the schema contains a direct frequency
+    attribute, return that attribute rather than inventing COUNT(*). Inspect role
+    or type columns on relationship tables; ownership wording must not include
+    unrelated relationship roles.
+13. For "which top N <entity>" followed by requested display attributes, retain
+    the stable entity identifier together with those attributes when identifying
+    each entity is part of the requested result.
+14. Use exact schema identifiers and only SQLite-compatible syntax.
+15. Before answering, verify projection, filters, join keys, row scope,
+   aggregation, ordering/limit, and unsupported assumptions against the
+   semantic contract.
+13. Follow the verified blueprint below. It was produced in a separate planning
+   call to prevent surface wording from overriding schema-grounded row grain.
+
+# Output format
+Return only XML containing executable SQL and no comments.
+<result>
+SELECT ...
+</result>
+
+# Database schema
+{DATABASE_SCHEMA}
+
+# Question
+{QUESTION}
+
+# Evidence
+{HINT}
+
+# Deterministic relationship hints
+{RELATIONSHIP_HINTS}
+
+# Verified context blueprint
+{BLUEPRINT}
+
+# Output
+"""
+
+
+EVIDENCE_LISTWISE_SELECTION_PROMPT = """
+# Task
+Select the single SQL candidate that most exactly answers the question under the
+provided evidence and database schema. Candidate order is not a confidence
+signal. Execution-cluster support is a useful prior, but not proof. Deterministic
+audit warnings are advisory signals and may be false positives; verify each
+warning against the question and schema instead of treating it as a hard rule.
+
+# Decision procedure
+1. Convert the question and evidence into a minimal semantic contract: requested
+   output, required filters, joins, grouping/window partition, aggregation,
+   ordering, limit, and tie behavior.
+2. Check every candidate against that contract clause by clause.
+3. Treat the evidence as binding when it defines a value or schema mapping.
+4. Reject unsupported assumptions. In particular, do not add IS NOT NULL,
+   latest/earliest-row logic, extra joins, DISTINCT, or tie-preserving rank
+   semantics unless the question/evidence requires them.
+5. Apply population-defining filters before ranking, windowing, or aggregation.
+   A filter for the requested entity type or status placed outside the ranked
+   subquery changes the population and is wrong unless the question explicitly
+   asks to rank the full population first and filter afterward.
+6. For "percentage of X who/that/with Y", COUNT must measure the X cohort and
+   only Y belongs in the conditional numerator. Reject a query that counts the
+   full table as its denominator.
+7. For superlatives, reject arbitrary entity-key selection before aggregation
+   when the ordering metric can repeat. Check grouping grain and tie behavior.
+8. Check whether delimiter-separated identifiers encode requested component
+   IDs before preferring auxiliary-table joins. A two-endpoint relationship is
+   one row with two endpoint columns, not two UNION rows or both orientations.
+9. Do not silently remove NULL rows. SQLite ordering already defines where NULLs
+   appear, and excluding them can change a top-k result for a small partition.
+10. Use execution-cluster support as a reliability prior after checking the
+    semantic contract. Prefer the higher-support result when candidates are
+    equally compatible. Select a lower-support result only when a concrete
+    question, evidence, schema, projection, filter, join, grouping, or ordering
+    clause makes every higher-support result wrong.
+11. Prefer the least assumptive candidate only after semantic correctness is
+   established. Do not prefer a candidate because it appears first.
+12. Reject type coercions not required by the evidence. In particular, do not
+    CAST a declared TEXT ordering key merely because its values look numeric.
+
+# Output format
+Return exactly one candidate label inside XML. Do not output any other text.
+<result>A</result>
+
+# Database schema
+{DATABASE_SCHEMA}
+
+# Question
+{QUESTION}
+
+# Evidence
+{HINT}
+
+# Candidates
+{CANDIDATES}
+
+# Output
 """

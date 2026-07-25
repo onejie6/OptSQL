@@ -1,0 +1,22 @@
+{
+  "dataset": "BIRD 2023 dev",
+  "examples": 1534,
+  "base": {
+    "correct": 1109,
+    "ex_percent": 72.2947,
+    "prompt_tokens": 140554036,
+    "completion_tokens": 31105581,
+    "total_tokens": 171659617
+  },
+  "final": {
+    "correct": 1121,
+    "ex_percent": 73.0769,
+    "fixed": 12,
+    "broken": 0
+  },
+  "deepseek_repair_and_controller": {
+    "prompt_tokens": 15401177,
+    "completion_tokens": 6592048,
+    "total_tokens": 21993225
+  }
+}

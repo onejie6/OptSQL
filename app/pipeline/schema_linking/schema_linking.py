@@ -12,6 +12,7 @@ import time
 import traceback
 from pathlib import Path
 from app.services import ArtifactStore, STAGE_ARTIFACT_FIELDS, configure_schema_service, load_stage_dataset, reset_schema_service
+from app.meta_controller import ControllerAction, MetaControllerRuntime
 
 class SchemaLinkingRunner:
     
@@ -32,6 +33,7 @@ class SchemaLinkingRunner:
     _parallelism: int = 16
     _progress_log_interval: int = 50
     _checkpoint_interval: int = 20
+    _meta_controller: MetaControllerRuntime | None = None
     
     def __init__(
         self,
@@ -43,6 +45,7 @@ class SchemaLinkingRunner:
         parallelism: int,
         progress_log_interval: int,
         checkpoint_interval: int,
+        meta_controller_config=None,
     ):
         self._stage_config = stage_config
         self._dataset_config = dataset_config
@@ -52,6 +55,8 @@ class SchemaLinkingRunner:
         self._parallelism = max(1, parallelism)
         self._progress_log_interval = max(1, progress_log_interval)
         self._checkpoint_interval = max(1, checkpoint_interval)
+        if meta_controller_config is not None and meta_controller_config.enabled:
+            self._meta_controller = MetaControllerRuntime(meta_controller_config)
         self._artifact_store = ArtifactStore(
             self._stage_config.save_path,
             "schema_linking",
@@ -98,6 +103,7 @@ class SchemaLinkingRunner:
             parallelism=app_config.run_config.parallelism,
             progress_log_interval=app_config.run_config.progress_log_interval,
             checkpoint_interval=app_config.run_config.checkpoint_interval,
+            meta_controller_config=app_config.meta_controller_config,
         )
     
     def _link_tables_and_columns(self, data_item: DataItem) -> None:
@@ -132,9 +138,74 @@ class SchemaLinkingRunner:
             total_token_usage["prompt_tokens"] += tokens["prompt_tokens"]
             total_token_usage["completion_tokens"] += tokens["completion_tokens"]
             total_token_usage["total_tokens"] += tokens["total_tokens"]
+
+        linking_results = {
+            "direct": direct_linked_tables_and_columns,
+            "reversed": reversed_linked_tables_and_columns,
+            "value": value_linked_tables_and_columns,
+        }
+        if self._meta_controller is not None:
+            current_budget = max(
+                self._stage_config.direct_linking_sampling_budget,
+                self._stage_config.reversed_linking_sampling_budget,
+            )
+            decision = self._meta_controller.assess_schema(
+                data_item,
+                linking_results,
+                current_budget,
+            )
+            if decision.action == ControllerAction.ESCALATE:
+                max_budget = self._meta_controller.config.max_schema_sampling_budget
+                extra_budgets = {
+                    "direct": max(0, max_budget - self._stage_config.direct_linking_sampling_budget),
+                    "reversed": max(0, max_budget - self._stage_config.reversed_linking_sampling_budget),
+                }
+                extra_tasks = {}
+                if extra_budgets["direct"]:
+                    extra_tasks["direct"] = self._inner_thread_pool_executor.submit(
+                        self._direct_linker.link, data_item, self._llm, extra_budgets["direct"]
+                    )
+                if extra_budgets["reversed"]:
+                    extra_tasks["reversed"] = self._inner_thread_pool_executor.submit(
+                        self._reversed_linker.link, data_item, self._llm, extra_budgets["reversed"]
+                    )
+                reflection_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                for name, future in extra_tasks.items():
+                    try:
+                        extra_result, extra_tokens = future.result()
+                        existing = linking_results[name]
+                        linking_results[name] = merge_schema_linking_results(
+                            [value for value in (existing, extra_result) if value is not None]
+                        )
+                        for key in reflection_usage:
+                            reflection_usage[key] += extra_tokens[key]
+                            total_token_usage[key] += extra_tokens[key]
+                    except Exception as exc:
+                        logger.error(
+                            f"Controller schema reflection failed for {name} on item "
+                            f"{data_item.question_id}: {exc}"
+                        )
+                after_decision = self._meta_controller.policy.assess_schema(
+                    data_item,
+                    linking_results,
+                    max_budget,
+                )
+                self._meta_controller.record_reflection_result(
+                    decision,
+                    signals_after=after_decision.signals,
+                    token_usage=reflection_usage,
+                )
+
+        direct_linked_tables_and_columns = linking_results["direct"]
+        reversed_linked_tables_and_columns = linking_results["reversed"]
+        value_linked_tables_and_columns = linking_results["value"]
         
         # Check if any linker failed (returned None) before merging
-        if direct_linked_tables_and_columns is None or reversed_linked_tables_and_columns is None or value_linked_tables_and_columns is None:
+        if self._meta_controller is None and (
+            direct_linked_tables_and_columns is None
+            or reversed_linked_tables_and_columns is None
+            or value_linked_tables_and_columns is None
+        ):
             failed_linkers = []
             if direct_linked_tables_and_columns is None:
                 failed_linkers.append("direct")
@@ -149,10 +220,25 @@ class SchemaLinkingRunner:
             data_item.final_linked_tables_and_columns = None
             data_item.database_schema_after_schema_linking = None
         else:
+            successful_results = [
+                result
+                for result in (
+                    direct_linked_tables_and_columns,
+                    reversed_linked_tables_and_columns,
+                    value_linked_tables_and_columns,
+                )
+                if result is not None
+            ]
+            if not successful_results:
+                schema_tables = (data_item.database_schema_after_value_retrieval or {}).get("tables") or {}
+                successful_results = [
+                    {
+                        table_name: list((table.get("columns") or {}).keys())
+                        for table_name, table in schema_tables.items()
+                    }
+                ]
             merged_linked_tables_and_columns = merge_schema_linking_results([
-                direct_linked_tables_and_columns, 
-                reversed_linked_tables_and_columns, 
-                value_linked_tables_and_columns
+                *successful_results
             ])
             data_item.direct_linked_tables_and_columns = direct_linked_tables_and_columns
             data_item.reversed_linked_tables_and_columns = reversed_linked_tables_and_columns

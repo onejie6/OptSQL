@@ -70,9 +70,8 @@ class LLM:
     @retry(
         wait=wait_random_exponential(multiplier=1, max=60),
         stop=stop_after_attempt(15),
-        # Retry on recoverable errors (including BadRequestError for provider-specific issues like "user location not supported")
-        # NOT on AuthenticationError (wrong API key won't fix itself)
-        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, BadRequestError, EmptyResponseError))
+        # Authentication and malformed requests are not transient.
+        retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, EmptyResponseError))
     )
     def ask(self, messages: List[Dict[str, str]],
                   system_message: Optional[Dict[str, str]] = None,
@@ -100,14 +99,19 @@ class LLM:
                     "model": _resolve_env_reference(self._config.model),
                     "messages": messages,
                     "max_tokens": current_max_tokens,
-                    "temperature": self._config.temperature,
                     "timeout": timeout,
-                    "n": current_n,
                 }
+                if current_n > 1:
+                    request_params["n"] = current_n
                 if self._config.reasoning_effort is not None:
                     request_params["reasoning_effort"] = self._config.reasoning_effort
-                if self._config.extra_body:
-                    request_params["extra_body"] = self._config.extra_body
+                extra_body = dict(self._config.extra_body)
+                if self._config.thinking is not None:
+                    extra_body["thinking"] = {"type": self._config.thinking}
+                if extra_body:
+                    request_params["extra_body"] = extra_body
+                if self._config.thinking != "enabled":
+                    request_params["temperature"] = self._config.temperature
                 request_params.update(kwargs)
                     
                 response = self._get_client().chat.completions.create(**request_params)

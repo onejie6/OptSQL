@@ -42,7 +42,7 @@ def convert_to_json_file(snapshot_path: str, output_path: Optional[str] = None):
     data = {}
 
     for item in dataset:
-        final_sql = item.final_selected_sql
+        final_sql = item.final_optimized_sql or item.final_selected_sql
         if final_sql is None:
             logger.warning(f"Item {item.question_id}: No valid SQL found, using 'Error'")
             final_sql = "Error"
@@ -76,7 +76,7 @@ def convert_to_sql_files(snapshot_path: str, output_dir: Optional[str] = None):
 
     for item in dataset:
         instance_id = getattr(item, "instance_id", None) or str(item.question_id)
-        final_sql = item.final_selected_sql
+        final_sql = item.final_optimized_sql or item.final_selected_sql
         if final_sql is None:
             logger.warning(f"Item {instance_id}: No valid SQL found, using 'Error'")
             final_sql = "Error"

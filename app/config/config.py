@@ -32,16 +32,18 @@ class LLMConfig(BaseModel):
     api_type: Literal["openai", "azure"] = Field(default="openai", description="The type of the api")
     api_version: Optional[str] = Field(default=None, description="The version of the Azure API")
     fix_end_token: bool = Field(default=False, description="Whether to fix the end token to the LLM response")
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(default=None, description="The reasoning effort for the model (only for reasoning models like o1, o3)")
+    reasoning_effort: Optional[Literal["low", "medium", "high", "max"]] = Field(default=None, description="The reasoning effort for reasoning-capable models")
+    thinking: Optional[Literal["enabled", "disabled"]] = Field(default=None, description="Provider thinking-mode toggle, passed in the request body when configured")
     max_model_len: int = Field(default=128000, description="The maximum context length of the model")
     extra_body: Dict[str, Any] = Field(default_factory=dict, description="Additional request body fields passed to the chat completion API")
 
 
 class DatasetConfig(BaseModel):
-    type: Literal["spider", "bird"] = Field(..., description="The type of the dataset")
+    type: Literal["spider", "bird", "spider2"] = Field(..., description="The type of the dataset")
     split: Optional[str] = Field(default="", description="The split of the dataset")
     root_path: Optional[str] = Field(..., description="The root path of the dataset")
     save_path: Optional[str] = Field(default=None, description="The save path of the dataset snapshot manifest")
+    question_ids: Optional[List[int]] = Field(default=None, description="Optional ordered BIRD question IDs to load for targeted calibration")
     max_samples: Optional[int] = Field(default=None, description="The maximum number of samples to load")
     max_samples_per_db: Optional[int] = Field(default=None, description="The maximum number of samples to load per database")
     
@@ -60,6 +62,10 @@ class DatasetConfig(BaseModel):
         elif self.type == "bird":
             if self.split not in ["dev", "test"]:
                 raise ValueError(f"Invalid split: {self.split}")
+        elif self.type == "spider2":
+            # Spider2 supports lite and snow splits
+            if self.split not in ["lite", "snow"]:
+                raise ValueError(f"Invalid split for spider2: {self.split}. Expected 'lite' or 'snow'")
         else:
             raise ValueError(f"Invalid dataset type: {self.type}")
         if self.save_path is None:
@@ -257,6 +263,7 @@ class SQLGenerationConfig(BaseModel):
     dc_sampling_budget: int = Field(default=5, description="The sampling budget of the dc generation")
     skeleton_sampling_budget: int = Field(default=5, description="The sampling budget of the skeleton generation")
     icl_sampling_budget: int = Field(default=5, description="The sampling budget of the icl generation")
+    evidence_sampling_budget: int = Field(default=0, description="The sampling budget of evidence-contract generation")
     icl_few_shot_examples_path: Optional[str] = Field(default=None, description="The path of the icl few shot examples")
 
 
@@ -273,6 +280,48 @@ class SQLSelectionConfig(BaseModel):
     filter_top_k_sql: int = Field(default=2, description="The number of top k sql to filter")
     evaluator_sampling_budget: int = Field(default=1, description="The sampling budget of the evaluator")
     shortcut_consistency_score_threshold: float = Field(default=0.8, description="The threshold of the consistency score to shortcut")
+    min_vote_agreement: float = Field(
+        default=2 / 3,
+        ge=0.5,
+        le=1.0,
+        description="Minimum share of valid listwise votes required to override the top-support fallback",
+    )
+    selection_strategy: Literal["pairwise", "evidence_listwise"] = Field(
+        default="pairwise",
+        description="Use legacy pairwise voting or position-balanced evidence-grounded listwise voting",
+    )
+
+
+class SQLOptimizationConfig(BaseModel):
+    enabled: bool = Field(default=False)
+    llm: Optional[LLMConfig] = Field(default=None)
+    save_path: str = Field(default=_path_to_str(WORKSPACE_ROOT / "sql_optimization"))
+    trigger_mode: Literal["risk", "all"] = Field(default="risk")
+    min_risk_score: int = Field(default=1, ge=0)
+    max_rewrites: int = Field(default=1, ge=0, le=3)
+    timing_repeat: int = Field(default=5, ge=2)
+    min_speedup_ratio: float = Field(default=1.05, ge=1.0)
+    min_runtime_ms: float = Field(default=1.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_enabled_llm(self):
+        if self.enabled and self.max_rewrites > 0 and self.llm is None:
+            raise ValueError("sql_optimization.llm is required when optimization is enabled")
+        return self
+
+
+class MetaControllerConfig(BaseModel):
+    enabled: bool = Field(default=False, description="Enable stage-level supervision")
+    mode: Literal["observe", "adaptive"] = Field(default="observe", description="Observe only or allow budget escalation")
+    trace_path: str = Field(default=_path_to_str(WORKSPACE_ROOT / "controller_trace.jsonl"), description="Append-only controller trace")
+    llm: Optional[LLMConfig] = Field(default=None, description="Optional model for later semantic controller actions")
+    max_schema_sampling_budget: int = Field(default=8, ge=1)
+    max_generation_sampling_budget: int = Field(default=8, ge=1)
+    schema_agreement_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+    min_schema_references: int = Field(default=1, ge=1)
+    min_unique_candidates: int = Field(default=3, ge=1)
+    min_cross_source_support: int = Field(default=2, ge=1)
+    max_reflections: int = Field(default=2, ge=0)
 
 
 class LLMExtractorConfig(BaseModel):
@@ -306,6 +355,8 @@ class AppConfig(BaseModel):
     sql_generation: SQLGenerationConfig = Field(default_factory=SQLGenerationConfig, description="The config of the sql generation")
     sql_revision: SQLRevisionConfig = Field(default_factory=SQLRevisionConfig, description="The config of the sql revision")
     sql_selection: SQLSelectionConfig = Field(default_factory=SQLSelectionConfig, description="The config of the sql selection")
+    sql_optimization: SQLOptimizationConfig = Field(default_factory=SQLOptimizationConfig, description="Semantics-preserving SQL performance optimization")
+    meta_controller: MetaControllerConfig = Field(default_factory=MetaControllerConfig, description="The full-pipeline supervision controller")
     llm_extractor: LLMExtractorConfig = Field(default_factory=LLMExtractorConfig, description="The config of the LLM extractor for fallback parsing")
     logger: LoggerConfig = Field(default_factory=LoggerConfig, description="The config of the logger")
     
@@ -397,6 +448,7 @@ class Config:
                 run_save_dir / "dataset.snapshot",
                 WORKSPACE_ROOT / "dataset" / str(dataset_type) / f"{dataset_split}.snapshot",
             ),
+            "question_ids": dataset_config.get("question_ids", None),
             "max_samples": dataset_config.get("max_samples", None),
             "max_samples_per_db": dataset_config.get("max_samples_per_db", None),
             # Spider2 specific configurations
@@ -577,6 +629,7 @@ class Config:
             "dc_sampling_budget": sql_generation_config.get("dc_sampling_budget", 5),
             "skeleton_sampling_budget": sql_generation_config.get("skeleton_sampling_budget", 5),
             "icl_sampling_budget": sql_generation_config.get("icl_sampling_budget", 5),
+            "evidence_sampling_budget": sql_generation_config.get("evidence_sampling_budget", 0),
             "icl_few_shot_examples_path": sql_generation_config.get("icl_few_shot_examples_path", None),
         }
         
@@ -625,6 +678,64 @@ class Config:
             "filter_top_k_sql": sql_selection_config.get("filter_top_k_sql", 10),
             "evaluator_sampling_budget": sql_selection_config.get("evaluator_sampling_budget", 1),
             "shortcut_consistency_score_threshold": sql_selection_config.get("shortcut_consistency_score_threshold", 0.8),
+            "selection_strategy": sql_selection_config.get("selection_strategy", "pairwise"),
+        }
+
+        sql_optimization_config = config.get("sql_optimization", {})
+        sql_optimization_enabled = sql_optimization_config.get("enabled", False)
+        sql_optimization_settings = {
+            "enabled": sql_optimization_enabled,
+            "llm": _resolve_llm_config(
+                default_llm_config,
+                sql_optimization_config.get("llm"),
+                "[sql_optimization]",
+                required=sql_optimization_enabled and sql_optimization_config.get("max_rewrites", 1) > 0,
+                llm_profiles=llm_profiles_config,
+                default_profile=default_llm_profile,
+                section_profile=sql_optimization_config.get("llm_profile"),
+            ),
+            "save_path": _get_path_value(
+                sql_optimization_config,
+                "save_path",
+                managed_paths,
+                run_save_dir / "sql_optimization.snapshot",
+                WORKSPACE_ROOT / "sql_optimization",
+            ),
+            "trigger_mode": sql_optimization_config.get("trigger_mode", "risk"),
+            "min_risk_score": sql_optimization_config.get("min_risk_score", 1),
+            "max_rewrites": sql_optimization_config.get("max_rewrites", 1),
+            "timing_repeat": sql_optimization_config.get("timing_repeat", 5),
+            "min_speedup_ratio": sql_optimization_config.get("min_speedup_ratio", 1.05),
+            "min_runtime_ms": sql_optimization_config.get("min_runtime_ms", 1.0),
+        }
+
+        meta_controller_config = config.get("meta_controller", {})
+        meta_controller_settings = {
+            "enabled": meta_controller_config.get("enabled", False),
+            "mode": meta_controller_config.get("mode", "observe"),
+            "trace_path": _get_path_value(
+                meta_controller_config,
+                "trace_path",
+                managed_paths,
+                run_save_dir / "controller_trace.jsonl",
+                WORKSPACE_ROOT / "controller_trace.jsonl",
+            ),
+            "llm": _resolve_llm_config(
+                default_llm_config,
+                meta_controller_config.get("llm"),
+                "[meta_controller]",
+                required=False,
+                llm_profiles=llm_profiles_config,
+                default_profile=None,
+                section_profile=meta_controller_config.get("llm_profile"),
+            ),
+            "max_schema_sampling_budget": meta_controller_config.get("max_schema_sampling_budget", 8),
+            "max_generation_sampling_budget": meta_controller_config.get("max_generation_sampling_budget", 8),
+            "schema_agreement_threshold": meta_controller_config.get("schema_agreement_threshold", 0.25),
+            "min_schema_references": meta_controller_config.get("min_schema_references", 1),
+            "min_unique_candidates": meta_controller_config.get("min_unique_candidates", 3),
+            "min_cross_source_support": meta_controller_config.get("min_cross_source_support", 2),
+            "max_reflections": meta_controller_config.get("max_reflections", 2),
         }
         
         # llm extractor config (retry settings for parsing)
@@ -649,6 +760,8 @@ class Config:
             sql_generation=SQLGenerationConfig(**sql_generation_settings),
             sql_revision=SQLRevisionConfig(**sql_revision_settings),
             sql_selection=SQLSelectionConfig(**sql_selection_settings),
+            sql_optimization=SQLOptimizationConfig(**sql_optimization_settings),
+            meta_controller=MetaControllerConfig(**meta_controller_settings),
             llm_extractor=LLMExtractorConfig(**llm_extractor_settings),
             logger=LoggerConfig(**logger_settings)
         )
@@ -715,6 +828,14 @@ class Config:
     @property
     def sql_selection_config(self):
         return self._app_config.sql_selection
+
+    @property
+    def sql_optimization_config(self):
+        return self._app_config.sql_optimization
+
+    @property
+    def meta_controller_config(self):
+        return self._app_config.meta_controller
     
     @property
     def llm_extractor_config(self):

@@ -9,6 +9,7 @@ StageName = Literal[
     "sql_generation",
     "sql_revision",
     "sql_selection",
+    "sql_optimization",
 ]
 
 
@@ -69,6 +70,14 @@ class SQLSelectionArtifact(BaseModel):
     sql_selection_llm_cost: Optional[Dict[str, Any]] = Field(default=None)
 
 
+class SQLOptimizationArtifact(BaseModel):
+    final_optimized_sql: Optional[str] = Field(default=None)
+    optimization_status: Optional[str] = Field(default=None)
+    optimization_trace: Optional[Dict[str, Any]] = Field(default=None)
+    sql_optimization_time: Optional[float] = Field(default=None)
+    sql_optimization_llm_cost: Optional[Dict[str, Any]] = Field(default=None)
+
+
 class AggregateMetrics(BaseModel):
     total_time: Optional[float] = Field(default=None)
     total_llm_cost: Optional[Dict[str, Any]] = Field(default=None)
@@ -80,6 +89,7 @@ class PipelineArtifacts(BaseModel):
     sql_generation: SQLGenerationArtifact = Field(default_factory=SQLGenerationArtifact)
     sql_revision: SQLRevisionArtifact = Field(default_factory=SQLRevisionArtifact)
     sql_selection: SQLSelectionArtifact = Field(default_factory=SQLSelectionArtifact)
+    sql_optimization: SQLOptimizationArtifact = Field(default_factory=SQLOptimizationArtifact)
     metrics: AggregateMetrics = Field(default_factory=AggregateMetrics)
 
 
@@ -89,6 +99,7 @@ STAGE_ARTIFACT_MODELS = {
     "sql_generation": SQLGenerationArtifact,
     "sql_revision": SQLRevisionArtifact,
     "sql_selection": SQLSelectionArtifact,
+    "sql_optimization": SQLOptimizationArtifact,
 }
 
 
@@ -128,6 +139,13 @@ STAGE_ARTIFACT_FIELDS = {
         "sql_selection_time",
         "sql_selection_llm_cost",
     ),
+    "sql_optimization": (
+        "final_optimized_sql",
+        "optimization_status",
+        "optimization_trace",
+        "sql_optimization_time",
+        "sql_optimization_llm_cost",
+    ),
 }
 
 
@@ -145,6 +163,7 @@ STAGE_VALIDATION_FIELDS = {
     "sql_generation": STAGE_ARTIFACT_FIELDS["sql_generation"],
     "sql_revision": STAGE_ARTIFACT_FIELDS["sql_revision"],
     "sql_selection": STAGE_ARTIFACT_FIELDS["sql_selection"],
+    "sql_optimization": STAGE_ARTIFACT_FIELDS["sql_optimization"],
 }
 
 

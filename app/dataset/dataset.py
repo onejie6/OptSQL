@@ -54,6 +54,11 @@ class DataItem(BaseModel):
     
     # SQL Selection Step
     final_selected_sql: Optional[str] = Field(default=None, description="The final selected sql of the data item")
+
+    # SQL Optimization Step
+    final_optimized_sql: Optional[str] = Field(default=None, description="Accepted optimized SQL, or the selected SQL after fallback")
+    optimization_status: Optional[str] = Field(default=None, description="Optimization acceptance or fallback status")
+    optimization_trace: Optional[Dict[str, Any]] = Field(default=None, description="Gold-blind optimization evidence and validation trace")
     
     # Schema linking recall metrics
     direct_linking_recall: Optional[Dict[str, float]] = Field(default=None, description="The direct linking recall")
@@ -67,6 +72,7 @@ class DataItem(BaseModel):
     sql_generation_time: Optional[float] = Field(default=None, description="The time cost of sql generation of the data item")
     sql_revision_time: Optional[float] = Field(default=None, description="The time cost of sql revision of the data item")
     sql_selection_time: Optional[float] = Field(default=None, description="The time cost of sql selection of the data item")
+    sql_optimization_time: Optional[float] = Field(default=None, description="The time cost of sql optimization")
     total_time: Optional[float] = Field(default=None, description="The total time cost of the data item")
     
     # LLM cost metrics for each step
@@ -75,6 +81,7 @@ class DataItem(BaseModel):
     sql_generation_llm_cost: Optional[Dict[str, Any]] = Field(default=None, description="The llm cost of sql generation of the data item")
     sql_revision_llm_cost: Optional[Dict[str, Any]] = Field(default=None, description="The llm cost of sql revision of the data item")
     sql_selection_llm_cost: Optional[Dict[str, Any]] = Field(default=None, description="The llm cost of sql selection of the data item")
+    sql_optimization_llm_cost: Optional[Dict[str, Any]] = Field(default=None, description="The llm cost of sql optimization")
     total_llm_cost: Optional[Dict[str, Any]] = Field(default=None, description="The total llm cost of the data item")
 
     def get_input_record(self) -> DataItemInput:
@@ -154,6 +161,7 @@ class DataItem(BaseModel):
             sql_generation=self.get_stage_artifact("sql_generation"),
             sql_revision=self.get_stage_artifact("sql_revision"),
             sql_selection=self.get_stage_artifact("sql_selection"),
+            sql_optimization=self.get_stage_artifact("sql_optimization"),
             metrics=self.get_metrics_record(),
         )
 
@@ -166,6 +174,7 @@ class DataItem(BaseModel):
         self.apply_stage_artifact("sql_generation", pipeline_artifacts.sql_generation)
         self.apply_stage_artifact("sql_revision", pipeline_artifacts.sql_revision)
         self.apply_stage_artifact("sql_selection", pipeline_artifacts.sql_selection)
+        self.apply_stage_artifact("sql_optimization", pipeline_artifacts.sql_optimization)
         self.apply_metrics_record(pipeline_artifacts.metrics)
 
     def get_item_id(self) -> str:
@@ -249,6 +258,20 @@ class BirdDataset(BaseDataset):
         data_path = Path(self._config.root_path) / self._config.split / f"{self._config.split}.json"
         with open(data_path, "r") as f:
             data_list = json.load(f)
+
+        if self._config.question_ids is not None:
+            by_question_id = {
+                int(item.get("question_id", position)): item
+                for position, item in enumerate(data_list)
+            }
+            missing = [
+                question_id
+                for question_id in self._config.question_ids
+                if question_id not in by_question_id
+            ]
+            if missing:
+                raise ValueError(f"Unknown BIRD question IDs: {missing}")
+            data_list = [by_question_id[question_id] for question_id in self._config.question_ids]
         
         if self._config.max_samples is not None:
             data_list = data_list[:self._config.max_samples]
@@ -260,11 +283,15 @@ class BirdDataset(BaseDataset):
             question_id = data_item.get("question_id")
             if question_id is None:
                 question_id = position
-            question = data_item.get("question") or ""
-            evidence = data_item.get("evidence") or ""
-            gold_sql = data_item.get("SQL") or ""
-            difficulty = data_item.get("difficulty") or ""
-            database_id = data_item.get("db_id")
+            question = str(data_item.get("question") or "")
+            evidence = str(data_item.get("evidence") or "")
+            gold_sql = str(data_item.get("SQL") or "")
+            difficulty = str(data_item.get("difficulty") or "")
+            database_id = str(data_item.get("db_id") or "")
+            if not question:
+                raise ValueError(f"BIRD item {question_id} is missing question")
+            if not database_id:
+                raise ValueError(f"BIRD item {question_id} is missing db_id")
             
             # Check if we've reached the max samples per database limit
             if self._config.max_samples_per_db is not None:
@@ -367,5 +394,13 @@ class DatasetFactory:
             return BirdDataset(dataset_config)
         elif dataset_config.type == "spider":
             return SpiderDataset(dataset_config)
+        elif dataset_config.type == "spider2":
+            from .spider2_dataset import Spider2LiteDataset, Spider2SnowDataset
+            if dataset_config.split == "lite":
+                return Spider2LiteDataset(dataset_config)
+            elif dataset_config.split == "snow":
+                return Spider2SnowDataset(dataset_config)
+            else:
+                raise ValueError(f"Invalid spider2 split: {dataset_config.split}. Expected 'lite' or 'snow'")
         else:
             raise ValueError(f"Invalid dataset type: {dataset_config.type}")

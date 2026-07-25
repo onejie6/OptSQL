@@ -31,21 +31,15 @@ config/local/
 config/*.toml
 
 # credentials
-bigquery_credential.json
-snowflake_credential.json
 .env
 .env.*
 !.env.example
-*.key
-*.pem
+!.env.example.ps1
+bigquery_credential.json
+snowflake_credential.json
 
-# experiment artifacts
-models/
-cache/
-*.snapshot
-*.snapshot.data/
-*.log
-*.pid
+# generated submission archives
+submission_dist/
 
 # local docs
 local_docs/

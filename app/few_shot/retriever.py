@@ -273,6 +273,8 @@ class FewShotRetriever:
         self.embedding_config = embedding_config
         self.embedding_batch_size = embedding_batch_size
         self._embedding_function = None
+        self._embedding_function_lock = Lock()
+        self._embedding_call_lock = Lock()
 
     @classmethod
     def from_index_path(
@@ -323,24 +325,27 @@ class FewShotRetriever:
     def _embed_texts(self, texts: List[str]) -> List[np.ndarray]:
         embedding_function = self._get_embedding_function()
         embeddings: List[np.ndarray] = []
-        for start in range(0, len(texts), self.embedding_batch_size):
-            batch = texts[start : start + self.embedding_batch_size]
-            batch_embeddings = embedding_function(batch)
-            embeddings.extend(np.asarray(embedding, dtype=np.float32) for embedding in batch_embeddings)
+        with self._embedding_call_lock:
+            for start in range(0, len(texts), self.embedding_batch_size):
+                batch = texts[start : start + self.embedding_batch_size]
+                batch_embeddings = embedding_function(batch)
+                embeddings.extend(np.asarray(embedding, dtype=np.float32) for embedding in batch_embeddings)
         return embeddings
 
     def _get_embedding_function(self):
         if self._embedding_function is None:
-            self._embedding_function = get_embedding_function(
-                model_name_or_path=self.embedding_config.embedding_model_name_or_path,
-                api_type=self.embedding_config.api_type,
-                use_qwen3_embedding=self.embedding_config.use_qwen3_embedding,
-                local_files_only=self.embedding_config.local_files_only,
-                normalize_embeddings=self.embedding_config.normalize_embeddings,
-                base_url=self.embedding_config.base_url,
-                api_key=self.embedding_config.api_key,
-                embedding_device=self.embedding_config.embedding_device,
-            )
+            with self._embedding_function_lock:
+                if self._embedding_function is None:
+                    self._embedding_function = get_embedding_function(
+                        model_name_or_path=self.embedding_config.embedding_model_name_or_path,
+                        api_type=self.embedding_config.api_type,
+                        use_qwen3_embedding=self.embedding_config.use_qwen3_embedding,
+                        local_files_only=self.embedding_config.local_files_only,
+                        normalize_embeddings=self.embedding_config.normalize_embeddings,
+                        base_url=self.embedding_config.base_url,
+                        api_key=self.embedding_config.api_key,
+                        embedding_device=self.embedding_config.embedding_device,
+                    )
         return self._embedding_function
 
 

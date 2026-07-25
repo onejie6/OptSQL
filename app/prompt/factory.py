@@ -34,6 +34,36 @@ class PromptFactory:
         if _is_spider2_db_type(db_type):
             return SPIDER2_SKELETON_SQL_GENERATION_PROMPT.format(DATABASE_SCHEMA=database_schema, QUESTION=question, HINT=hint, DATABASE_ENGINE=db_type.upper())
         return SKELETON_SQL_GENERATION_PROMPT.format(DATABASE_SCHEMA=database_schema, QUESTION=question, HINT=hint)
+
+    @staticmethod
+    def format_evidence_blueprint_prompt(
+        database_schema: str,
+        question: str,
+        hint: str,
+        relationship_hints: str = "No additional deterministic hints.",
+    ) -> str:
+        return EVIDENCE_BLUEPRINT_PROMPT.format(
+            DATABASE_SCHEMA=database_schema,
+            QUESTION=question,
+            HINT=hint,
+            RELATIONSHIP_HINTS=relationship_hints,
+        )
+
+    @staticmethod
+    def format_evidence_sql_generation_prompt(
+        database_schema: str,
+        question: str,
+        hint: str,
+        blueprint: str = "No separate blueprint was available; derive it from the contract rules.",
+        relationship_hints: str = "No additional deterministic hints.",
+    ) -> str:
+        return EVIDENCE_SQL_GENERATION_PROMPT.format(
+            DATABASE_SCHEMA=database_schema,
+            QUESTION=question,
+            HINT=hint,
+            BLUEPRINT=blueprint,
+            RELATIONSHIP_HINTS=relationship_hints,
+        )
     
     @staticmethod
     def format_dc_sql_generation_prompt(database_schema: str, question: str, hint: str, db_type: Optional[str] = None) -> str:
@@ -68,3 +98,37 @@ class PromptFactory:
         if _is_spider2_db_type(db_type):
             return SPIDER2_BR_PAIR_SELECTION_PROMPT.format(DATABASE_SCHEMA=database_schema, QUESTION=question, HINT=hint, QUERY_A=query_a, RESULT_A=result_a, QUERY_B=query_b, RESULT_B=result_b, DATABASE_ENGINE=db_type.upper())
         return BR_PAIR_SELECTION_PROMPT.format(DATABASE_SCHEMA=database_schema, QUESTION=question, HINT=hint, QUERY_A=query_a, RESULT_A=result_a, QUERY_B=query_b, RESULT_B=result_b)
+
+    @staticmethod
+    def format_evidence_listwise_selection_prompt(
+        database_schema: str,
+        question: str,
+        hint: str,
+        candidates: List[Tuple],
+    ) -> str:
+        if len(candidates) > 26:
+            raise ValueError("Listwise selection supports at most 26 candidates")
+        candidate_blocks = []
+        for index, candidate in enumerate(candidates):
+            query, result = candidate[:2]
+            support = candidate[2] if len(candidate) > 2 else None
+            audit_findings = candidate[3] if len(candidate) > 3 else []
+            label = chr(ord("A") + index)
+            support_line = (
+                f"Execution-cluster support: {support:.1%}\n" if support is not None else ""
+            )
+            audit_line = (
+                "Deterministic audit warnings (advisory only): "
+                + ("; ".join(audit_findings) if audit_findings else "none")
+                + "\n"
+            )
+            candidate_blocks.append(
+                f"## Candidate {label}\n{support_line}{audit_line}SQL:\n{query}\n\n"
+                f"Execution result:\n{result[:4000]}"
+            )
+        return EVIDENCE_LISTWISE_SELECTION_PROMPT.format(
+            DATABASE_SCHEMA=database_schema,
+            QUESTION=question,
+            HINT=hint,
+            CANDIDATES="\n\n".join(candidate_blocks),
+        )
