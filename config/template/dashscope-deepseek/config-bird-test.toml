@@ -4,18 +4,18 @@ print_level = "INFO"
 [run]
 save_root = "workspace/runs"
 shared_dir = "workspace/shared/bird"
-exp_name = "optsql-openrouter-deepseek-bird-test"
+exp_name = "optsql-dashscope-deepseek-bird-test"
 parallelism = 2
 embedding_batch_size = 128
 llm_timeout = 600
 progress_log_interval = 1
 checkpoint_interval = 1
-default_llm_profile = "qwen_openrouter"
+default_llm_profile = "qwen_dashscope"
 
-[llm_profiles.qwen_openrouter]
-model = "qwen/qwen3-coder-plus"
-base_url = "https://openrouter.ai/api/v1"
-api_key = "env:OPENROUTER_API_KEY"
+[llm_profiles.qwen_dashscope]
+model = "qwen3-coder-plus"
+base_url = "https://ws-t04z7f9rl8wvthos.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+api_key = "env:DASHSCOPE_API_KEY"
 max_tokens = 16384
 temperature = 0.7
 n_call_strategy = "split"
@@ -62,43 +62,43 @@ question_weight = 0.6
 sql_weight = 0.4
 similarity_device = "cuda:0"
 force_rebuild = false
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [few_shot_index.preliminary_sql]
 enabled = true
 dc_sampling_budget = 8
 skeleton_sampling_budget = 8
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [value_retrieval]
 max_values_per_column = 5
 backend = "local_index"
 local_index_device = "cuda:0"
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [schema_linking]
 direct_linking_sampling_budget = 8
 reversed_linking_sampling_budget = 8
 value_distance_threshold = 0.05
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [sql_generation]
 dc_sampling_budget = 8
 skeleton_sampling_budget = 8
 icl_sampling_budget = 8
 evidence_sampling_budget = 0
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [sql_revision]
 checker_sampling_budget = 8
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [sql_selection]
 filter_top_k_sql = 2
 evaluator_sampling_budget = 8
 shortcut_consistency_score_threshold = 0.6
 selection_strategy = "pairwise"
-llm_profile = "qwen_openrouter"
+llm_profile = "qwen_dashscope"
 
 [llm_extractor]
 max_retry = 5

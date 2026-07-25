@@ -48,10 +48,13 @@ def _check(
 
 def main() -> None:
     _check(
-        provider="openrouter",
-        env_name="OPENROUTER_API_KEY",
-        base_url="https://openrouter.ai/api/v1",
-        model="qwen/qwen3-coder-plus",
+        provider="dashscope",
+        env_name="DASHSCOPE_API_KEY",
+        base_url=(
+            "https://ws-t04z7f9rl8wvthos.cn-beijing.maas.aliyuncs.com/"
+            "compatible-mode/v1"
+        ),
+        model="qwen3-coder-plus",
     )
     _check(
         provider="deepseek",

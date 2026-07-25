@@ -1,4 +1,4 @@
-"""Offline preflight for the OpenRouter plus DeepSeek BIRD submission."""
+"""Offline preflight for the DashScope plus DeepSeek BIRD submission."""
 
 from __future__ import annotations
 
@@ -10,10 +10,13 @@ from pathlib import Path
 
 
 EXPECTED_PROFILES = {
-    "qwen_openrouter": {
-        "model": "qwen/qwen3-coder-plus",
-        "base_url": "https://openrouter.ai/api/v1",
-        "api_key": "env:OPENROUTER_API_KEY",
+    "qwen_dashscope": {
+        "model": "qwen3-coder-plus",
+        "base_url": (
+            "https://ws-t04z7f9rl8wvthos.cn-beijing.maas.aliyuncs.com/"
+            "compatible-mode/v1"
+        ),
+        "api_key": "env:DASHSCOPE_API_KEY",
     },
     "deepseek_controller": {
         "model": "deepseek-v4-pro",
@@ -89,8 +92,8 @@ def main() -> int:
                     f"got {actual.get(key)!r}"
                 )
 
-    if (config.get("run") or {}).get("default_llm_profile") != "qwen_openrouter":
-        errors.append("run.default_llm_profile must be qwen_openrouter")
+    if (config.get("run") or {}).get("default_llm_profile") != "qwen_dashscope":
+        errors.append("run.default_llm_profile must be qwen_dashscope")
     if (config.get("dataset") or {}).get("split") != "test":
         errors.append("submission config must use the BIRD test split")
 
@@ -102,11 +105,11 @@ def main() -> int:
         "sql_revision",
         "sql_selection",
     ):
-        if (config.get(section) or {}).get("llm_profile") != "qwen_openrouter":
-            errors.append(f"{section}.llm_profile must be qwen_openrouter")
+        if (config.get(section) or {}).get("llm_profile") != "qwen_dashscope":
+            errors.append(f"{section}.llm_profile must be qwen_dashscope")
 
     if not args.allow_missing_keys:
-        for env_name in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
+        for env_name in ("DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY"):
             if not os.getenv(env_name):
                 errors.append(f"{env_name} is not set")
 
@@ -122,8 +125,11 @@ def main() -> int:
         return 1
 
     print("SUBMISSION PREFLIGHT PASSED")
-    print("base_provider=https://openrouter.ai/api/v1")
-    print("base_model=qwen/qwen3-coder-plus")
+    print(
+        "base_provider=https://ws-t04z7f9rl8wvthos.cn-beijing.maas.aliyuncs.com/"
+        "compatible-mode/v1"
+    )
+    print("base_model=qwen3-coder-plus")
     print("controller_provider=https://api.deepseek.com")
     print("controller_model=deepseek-v4-pro")
     print("dataset=bird/test")

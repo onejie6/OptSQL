@@ -1,6 +1,6 @@
 # OptSQL BIRD Test Submission
 
-This package contains the provider-compliant BIRD test entry point for OptSQL.
+This package contains the BIRD test entry point for OptSQL.
 It produces two checkpoints from one run:
 
 1. `base_predictions.json`: Qwen3-Coder-Plus base generation and SQL selection.
@@ -12,22 +12,23 @@ It produces two checkpoints from one run:
 - Method: OptSQL
 - Team: OptSQL-Repro
 - Lead contributor: Lin Li, Zhejiang University
-- Primary contact: Xuyijie, Zhejiang University and Alibaba Cloud
+- Primary contact: Xuyijie, Zhejiang University
 - Contact: xu.yijie@qq.com
 
 ## Declared Models
 
 | Role | Provider | Model |
 | --- | --- | --- |
-| Base Text-to-SQL pipeline | OpenRouter | `qwen/qwen3-coder-plus` |
+| Base Text-to-SQL pipeline | Alibaba Cloud Model Studio / DashScope | `qwen3-coder-plus` |
 | Repair and Controller | DeepSeek official API | `deepseek-v4-pro` |
 | Embedding and retrieval | Local | `Qwen/Qwen3-Embedding-0.6B` |
 
-No Aliyun or DashScope endpoint is used. API credentials are read only from
-environment variables. SQLite databases are opened locally and are never
-uploaded. Model prompts contain the question, evidence, selected schema,
-retrieved value snippets, and retrieved training examples required for
-Text-to-SQL inference.
+API credentials are read only from environment variables. SQLite databases
+are opened locally and are never uploaded. Model prompts contain the question,
+evidence, selected schema, retrieved value snippets, and retrieved training
+examples required for Text-to-SQL inference. Qwen requests are sent only to
+the declared DashScope workspace endpoint, and Controller requests are sent
+only to the official DeepSeek endpoint.
 
 ## Development Result
 
@@ -58,7 +59,7 @@ Gold-free development prediction files are included under `results/bird-dev/`.
 - Python 3.12
 - One CUDA-capable GPU with at least 8 GB VRAM
 - At least 32 GB system RAM
-- OpenRouter credit for `qwen/qwen3-coder-plus`
+- Alibaba Cloud Model Studio credit for `qwen3-coder-plus`
 - DeepSeek official API credit for `deepseek-v4-pro`
 - BIRD train and hidden test files supplied by the evaluator
 
@@ -75,7 +76,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 
 mkdir -p config/local models
-cp config/template/openrouter-deepseek/config-bird-test.toml \
+cp config/template/dashscope-deepseek/config-bird-test.toml \
   config/local/config-bird-test.toml
 
 python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-Embedding-0.6B', local_dir='models/Qwen3-Embedding-0.6B')"
@@ -84,7 +85,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwe
 Set the dedicated evaluation credentials in the launching shell:
 
 ```bash
-export OPENROUTER_API_KEY='temporary-openrouter-evaluation-key'
+export DASHSCOPE_API_KEY='temporary-dashscope-evaluation-key'
 export DEEPSEEK_API_KEY='temporary-deepseek-evaluation-key'
 ```
 
@@ -131,7 +132,7 @@ The checks hide all credential values.
 ```bash
 CONFIG_PATH=config/local/config-bird-test.toml \
 PYTHON=.venv/bin/python \
-bash script/run_bird_test_openrouter_deepseek.sh
+bash script/run_bird_test_dashscope_deepseek.sh
 ```
 
 The entry point runs:
@@ -148,8 +149,8 @@ The entry point runs:
 Final files:
 
 ```text
-workspace/runs/optsql-openrouter-deepseek-bird-test/base_predictions.json
-workspace/runs/optsql-openrouter-deepseek-bird-test/final_predictions.json
+workspace/runs/optsql-dashscope-deepseek-bird-test/base_predictions.json
+workspace/runs/optsql-dashscope-deepseek-bird-test/final_predictions.json
 ```
 
 ## Resume and Failure Handling
@@ -163,7 +164,7 @@ SQL until it is retried successfully.
 To intentionally rerun one completed stage, delete only its marker under:
 
 ```text
-workspace/runs/optsql-openrouter-deepseek-bird-test/completed_stages/
+workspace/runs/optsql-dashscope-deepseek-bird-test/completed_stages/
 ```
 
 Do not delete snapshots or JSONL checkpoints when resuming.
