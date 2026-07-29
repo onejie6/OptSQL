@@ -12,7 +12,7 @@ It produces two checkpoints from one run:
 - Method: OptSQL
 - Team: OptSQL-Repro
 - Lead contributor: Lin Li, Zhejiang University
-- Primary contact: Xuyijie, Zhejiang University and Alibaba Cloud
+- Primary contact: Xuyijie, Zhejiang University
 - Contact: xu.yijie@qq.com
 
 ## Declared Models
@@ -31,17 +31,15 @@ Text-to-SQL inference.
 
 ## Development Result
 
-The development experiment used all 1,534 BIRD 2023 dev examples:
+The development experiment used all 1,534 examples in the original BIRD 2023
+dev split. The final OptSQL checkpoint achieved:
 
-| Checkpoint | Correct | EX |
-| --- | ---: | ---: |
-| Qwen3-Coder-Plus base | 1,109 | 72.2947% |
-| OptSQL final | 1,121 | 73.0769% |
+- Execution Accuracy (EX): 73.0769% (1,121/1,534)
+- Valid Efficiency Score (VES): 80.2204
 
-The Controller fixed 12 examples and broke 0 on the development set. These are
-development results; official test performance must be determined by BIRD.
-The evaluation used the original 1,534-example BIRD 2023 dev split, not the
-2025 `bird-sql-dev-1106` refresh.
+These are development results; official test performance must be determined by
+BIRD. The evaluation used the original BIRD 2023 dev split, not the 2025
+`bird-sql-dev-1106` refresh.
 
 Development API usage:
 
