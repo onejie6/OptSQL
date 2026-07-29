@@ -7,7 +7,7 @@ cd "$PROJECT_ROOT"
 export PYTHONUTF8=1
 export CONFIG_PATH="${CONFIG_PATH:-config/local/config-bird-test.toml}"
 PYTHON="${PYTHON:-python}"
-RUN_ROOT="${RUN_ROOT:-workspace/runs/optsql-dashscope-deepseek-bird-test}"
+RUN_ROOT="${RUN_ROOT:-workspace/runs/optsql-openrouter-deepseek-bird-test}"
 LOG_DIR="$RUN_ROOT/logs"
 MARKER_DIR="$RUN_ROOT/completed_stages"
 BASE_SNAPSHOT="$RUN_ROOT/sql_selection.snapshot"
@@ -27,7 +27,7 @@ require_env() {
   fi
 }
 
-require_env DASHSCOPE_API_KEY
+require_env OPENROUTER_API_KEY
 require_env DEEPSEEK_API_KEY
 
 for required in \
